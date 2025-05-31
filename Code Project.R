@@ -1,35 +1,38 @@
+# Load the required libraries
 library(dplyr)
 require(zoo)
 require(tseries)
 library(fUnitRoots)
+library(astsa)
 library(ellipse)
 
-# Partie 1
-#import et création de la série
-data <- read.csv("~/work/Séries Temp/valeurs_mensuelles.csv",sep=";",skip=3)
+# -----------------------------------------------------------
+# PART 1: Data Import and Preprocessing
+# - Load monthly series data, clean it, and convert to time series object.
+# - Visualize the series to check overall structure and trend.
+# -----------------------------------------------------------
+data <- read.csv("~/work/Séries Temp/valeurs_mensuelles.csv", sep=";", skip=3)
 data_clean <- data[, -3]
 colnames(data_clean) <- c("Périod", "Value")
 dates <- as.yearmon(seq(from = 1990, to = 2025+2/12, by = 1/12))
 serie_temp <- zoo(data_clean$Value, order.by = dates)
 serie_temp <- rev(serie_temp)
 
-# visualisation série
 head(serie_temp)
 tail(serie_temp)
 plot(serie_temp, main = "Time Series", xlab = "Time", ylab = "Value", col = "red")
 
-
-# test pour valider la tendance négative 
+# -----------------------------------------------------------
+# Check for deterministic trend via linear regression.
+# -----------------------------------------------------------
 temps <- 1:length(serie_temp)
 reg_tendance <- lm(coredata(serie_temp) ~ temps)
 summary(reg_tendance)
-# La série présente une tendance déterministe fortement significative.
-# La pente négative (
-#   β<0
-#   β<0) indique que la série diminue linéairement au cours du temps.
-# En plus comme non démoyennisée alors il faut mettre constante + trend dans les régression 
 
-# Test Adf 
+# -----------------------------------------------------------
+# Stationarity testing with augmented Dickey-Fuller (ADF) test.
+# - Uses a custom function that iteratively chooses the number of lags.
+# -----------------------------------------------------------
 Qtests <- function(series, k, fitdf=0) {
   pvals <- apply(matrix(1:k), 1, FUN=function(l) {
     pval <- if (l<=fitdf) NA else Box.test(series, lag=l, type="Ljung-Box", fitdf=fitdf)$p.value
@@ -45,7 +48,7 @@ adfTest_valid <- function(series, kmax, adftype){
     cat(paste0("ADF with ",k," lags: residuals OK ? "))
     adf <- adfTest(series, lags=k, type=adftype)
     pvals <- Qtests(adf@test$lm$residuals, 24, fitdf = length(adf@test$lm$coefficients))[,2]
-    if (sum(pvals<0.05,na.rm=T)==0) {
+    if (sum(pvals<0.05, na.rm=TRUE) == 0) {
       noautocorr <- 1; cat("OK \n")
     } else cat("no \n")
     k <- k+1
@@ -53,52 +56,34 @@ adfTest_valid <- function(series, kmax, adftype){
   return(adf)
 }
 
-adf <- adfTest_valid(serie_temp,24,adftype="ct")
+adf <- adfTest_valid(serie_temp, 24, adftype="ct")
 
-# lags 21 
-# Tu as testé automatiquement tous les lags de 0 à 21 dans le test ADF.
-# À chaque fois, tu as vérifié que les résidus du modèle ADF n’étaient pas autocorrélés, à l’aide du test de Ljung-Box (jusqu’à 24 lags).
-# À chaque fois, au moins une p-value < 0.05 → ❌ résidus autocorrélés.
-# À 21 lags, enfin toutes les p-values > 0.05 → ✅ résidus non autocorrélés → le test ADF devient valide.
-
-adf # avec 21 lags
-# p-value 0.6328 donc pas de stationnarité 
-
+# Visual check of ACF and PACF of the original series
 par(mfrow=c(1,2))
-acf(serie_temp, 24);pacf(serie_temp, 24)
+acf(serie_temp, 24); pacf(serie_temp, 24)
 par(mfrow=c(1,1))
 
-# 🔹 À gauche : ACF (Autocorrélation simple)
-# Toutes les barres sont positives, décroissantes lentement, très au-dessus des bandes bleues.
-# Cela suggère une forte persistance dans la série, typique d’une non-stationnarité.
-# Comportement classique d’un processus AR(1) non stationnaire ou avec racine unitaire.
-# 🔹 À droite : PACF (Autocorrélation partielle)
-# Forte valeur au premier retard (lag = 1), puis les valeurs deviennent faibles ou insignifiantes.
-# Cela suggère que si on veut modéliser cette série en AR, un AR(1) ou AR(p) avec petit p pourrait être raisonnable après stationnarisation
-
-
-# différentiation première 
+# -----------------------------------------------------------
+# Differencing to achieve stationarity (first difference).
+# -----------------------------------------------------------
 serie_diff <- diff(serie_temp)
 plot(serie_diff, main = "Differenced Series (d = 1)", xlab = "Time", ylab = "First Difference", col = "blue")
 
-# Test sur la série différenciée
-adf_diff <- adfTest_valid(serie_diff,24,adftype="ct")
+# Stationarity test on the differenced series
+adf_diff <- adfTest_valid(serie_diff, 24, adftype="ct")
 adf_diff
 
-# la p-value est de 0.01 donc la série est stationnaire 
-
-# Partie 2 
-# Autocorrélogramme 
+# -----------------------------------------------------------
+# PART 2: Model Identification and Selection
+# - Explore ARMA(p, q) models for p, q <= 4.
+# - Check residuals for whiteness using Ljung-Box test.
+# -----------------------------------------------------------
 par(mfrow=c(1,2))
-acf(serie_diff, 24);pacf(serie_diff, 24)
+acf(serie_diff, 24); pacf(serie_diff, 24)
 par(mfrow=c(1,1))
 
-
-# On va tester pour p <= 4 et q <= 4 bien que quelques autres petits lags marginalement significatifs
 pmax <- 4
 qmax <- 4
-
-# Résidus non auto-corrélés
 k_lags <- 24  
 
 residu_OK <- matrix(NA, nrow = pmax + 1, ncol = qmax + 1)
@@ -121,9 +106,9 @@ for (p in 0:pmax) {
 
 residu_OK
 
+# Function to extract and summarize valid models
 extract_valid_models <- function(residu_OK, series) {
   results <- list()
-  
   for (i in 1:nrow(residu_OK)) {
     for (j in 1:ncol(residu_OK)) {
       if (isTRUE(residu_OK[i, j])) {
@@ -132,22 +117,17 @@ extract_valid_models <- function(residu_OK, series) {
         mod <- try(arima(series, order = c(p, 0, q), include.mean = FALSE))
         if (!inherits(mod, "try-error")) {
           results[[length(results) + 1]] <- data.frame(
-            p = p,
-            q = q,
-            AIC = mod$aic,
-            BIC = BIC(mod)
+            p = p, q = q, AIC = mod$aic, BIC = BIC(mod)
           )
         }
       }
     }
   }
-  
   if (length(results) == 0) {
     return(data.frame(p = integer(0), q = integer(0), AIC = numeric(0), BIC = numeric(0),
                       AIC_min = logical(0), BIC_min = logical(0)))
   }
   models_df <- do.call(rbind, results)
-  
   models_df$AIC_min <- FALSE
   models_df$BIC_min <- FALSE
   idx_AIC_min <- which.min(models_df$AIC)
@@ -157,46 +137,43 @@ extract_valid_models <- function(residu_OK, series) {
   return(models_df)
 }
 
-
 valid_models <- extract_valid_models(residu_OK, serie_diff)
 valid_models
 
-
-
-
-
-# Partie 3 
-arima011 <- arima(serie_diff, order = c(0, 0, 1), include.mean = FALSE)
-# estimated MA(1) coefficient is -0.257
-
+# -----------------------------------------------------------
+# PART 3: Forecasting and Visualizing Results
+# - Fit final ARIMA model, compute forecast error covariance.
+# - Plot forecasts and 95% confidence ellipsoid.
+# - Plot residual histogram.
+# -----------------------------------------------------------
+arima011 <- arima(serie_temp, order = c(0, 1, 1), include.mean = FALSE)
+arima011
 
 pred <- predict(arima011, n.ahead = 2)
-Xhat <- pred$pred 
+Yhat <- pred$pred 
 
-
-se_1 <- arima011$sigma2
+se <- arima011$sigma2
 theta1 <- arima011$coef["ma1"]
 
-# Construction de la matrice de variance-covariance pour horizon 2
-Sigma <- se_1 * matrix(
-  c(1,
-    theta1,
-    theta1,
-    1 + theta1^2),
+Sigma <- se * matrix(
+  c(1, theta1, theta1, 1 + theta1^2),
   nrow = 2, byrow = TRUE
 )
 
-# Affichage
 print(Sigma)
 
-# Affichage de l’ellipsoïde de confiance à 95%
+serie_temp_ts <- ts(coredata(serie_temp), start = c(1990, 1), frequency = 12)
+prev <- sarima.for(serie_temp_ts, n.ahead = 2, p = 0, d = 1, q = 1, plot = TRUE,
+                   main = "2-step-ahead forecasts with 95% confidence intervals")
+
 alpha <- 0.05
-ellipse_points <- ellipse(Sigma, centre = Xhat, level = 1 - alpha)
+ellipse_points <- ellipse(Sigma, centre = Yhat, level = 1 - alpha)
 
 plot(ellipse_points, type = 'l',
-     xlab = expression(X[T+1]), ylab = expression(X[T+2]),
-     main = "Confidence ellipsoid 95%")
+     xlab = expression(Y[T+1]), ylab = expression(Y[T+2]),
+     main = "95% confidence ellipsoid")
+points(Yhat[1], Yhat[2], col = 'blue', pch = 19)
 
-points(Xhat[1], Xhat[2], col = 'blue', pch = 19)
-
-
+res <- residuals(arima011)
+hist(res, breaks = 20, main = "Histogram of ARIMA(0,1,1) residuals",
+     xlab = "Residuals", col = "lightblue", border = "gray")
